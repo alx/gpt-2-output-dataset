@@ -17,6 +17,27 @@ device: str = None
 def log(*args):
     print(f"[{os.environ.get('RANK', '')}]", *args, file=sys.stderr)
 
+def probOnQuery(query):
+
+    tokens = tokenizer.encode(query)
+    all_tokens = len(tokens)
+    tokens = tokens[:tokenizer.max_len - 2]
+    used_tokens = len(tokens)
+    tokens = torch.tensor([tokenizer.bos_token_id] + tokens + [tokenizer.eos_token_id]).unsqueeze(0)
+    mask = torch.ones_like(tokens)
+
+    with torch.no_grad():
+        logits = model(tokens.to(device), attention_mask=mask.to(device))[0]
+        probs = logits.softmax(dim=-1)
+
+    fake, real = probs.detach().cpu().flatten().numpy().tolist()
+
+    return dict(
+        all_tokens=all_tokens,
+        used_tokens=used_tokens,
+        real_probability=real,
+        fake_probability=fake
+    )
 
 class RequestHandler(SimpleHTTPRequestHandler):
 
@@ -32,24 +53,22 @@ class RequestHandler(SimpleHTTPRequestHandler):
 
         self.begin_content('application/json;charset=UTF-8')
 
-        tokens = tokenizer.encode(query)
-        all_tokens = len(tokens)
-        tokens = tokens[:tokenizer.max_len - 2]
-        used_tokens = len(tokens)
-        tokens = torch.tensor([tokenizer.bos_token_id] + tokens + [tokenizer.eos_token_id]).unsqueeze(0)
-        mask = torch.ones_like(tokens)
+        windowLength = 10
+        windows = []
+        for i in range(0, len(query.split()) - windowLength):
+            windowString = ' '.join(query.split()[i : i + windowLength])
+            windowProbs = probOnQuery(windowString)
+            windowProbs['string'] = windowString
+            windows.append(windowProbs)
 
-        with torch.no_grad():
-            logits = model(tokens.to(device), attention_mask=mask.to(device))[0]
-            probs = logits.softmax(dim=-1)
-
-        fake, real = probs.detach().cpu().flatten().numpy().tolist()
+        queryProbs = probOnQuery(query)
 
         self.wfile.write(json.dumps(dict(
-            all_tokens=all_tokens,
-            used_tokens=used_tokens,
-            real_probability=real,
-            fake_probability=fake
+            all_tokens=queryProbs['all_tokens'],
+            used_tokens=queryProbs['used_tokens'],
+            real_probability=queryProbs['real_probability'],
+            fake_probability=queryProbs['fake_probability'],
+            windows=windows
         )).encode())
 
     def begin_content(self, content_type):
